@@ -37,7 +37,7 @@ func TestTransportPersistConnReadLoopEOF(t *testing.T) {
 	tr := new(Transport)
 	req, _ := NewRequest("GET", "http://"+ln.Addr().String(), nil)
 	req = req.WithT(t)
-	treq := &transportRequest{Request: req}
+	treq := &transportRequest{Request: req, bodyWritten: make(chan struct{})}
 	cm := connectMethod{targetScheme: "http", targetAddr: ln.Addr().String()}
 	pc, err := tr.getConn(treq, cm)
 	if err != nil {

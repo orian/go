@@ -414,9 +414,11 @@ func ProxyURL(fixedURL *url.URL) func(*Request) (*url.URL, error) {
 // optional extra headers to write and stores any error to return
 // from roundTrip.
 type transportRequest struct {
-	*Request                        // original request, not to be mutated
-	extra    Header                 // extra headers to write, or nil
-	trace    *httptrace.ClientTrace // optional
+	*Request                     // original request, not to be mutated
+	extra Header                 // extra headers to write, or nil
+	trace *httptrace.ClientTrace // optional
+
+	bodyWritten chan struct{}
 
 	mu  sync.Mutex // guards err
 	err error      // first setError value for mapRoundTripError to consider
@@ -508,7 +510,7 @@ func (t *Transport) roundTrip(req *Request) (*Response, error) {
 		}
 
 		// treq gets modified by roundTrip, so we need to recreate for each retry.
-		treq := &transportRequest{Request: req, trace: trace}
+		treq := &transportRequest{Request: req, trace: trace, bodyWritten: make(chan struct{})}
 		cm, err := t.connectMethodForRequest(treq)
 		if err != nil {
 			req.closeBody()
@@ -1886,6 +1888,7 @@ func (pc *persistConn) readLoop() {
 			err = transportReadFromServerError{err}
 			closeErr = err
 		}
+		<-rc.reqBodyWritten
 
 		if err != nil {
 			if pc.readLimit <= 0 {
@@ -2169,6 +2172,7 @@ func (pc *persistConn) writeLoop() {
 		case wr := <-pc.writech:
 			startBytesWritten := pc.nwrite
 			err := wr.req.Request.write(pc.bw, pc.isProxy, wr.req.extra, pc.waitForContinue(wr.continueCh))
+			close(wr.req.bodyWritten)
 			if bre, ok := err.(requestBodyReadError); ok {
 				err = bre.error
 				// Errors reading from the user's
@@ -2257,6 +2261,8 @@ type requestAndChan struct {
 	// the server responds 100 Continue, readLoop send a value
 	// to writeLoop via this chan.
 	continueCh chan<- struct{}
+
+	reqBodyWritten <-chan struct{}
 
 	callerGone <-chan struct{} // closed when roundTrip caller has returned
 }
@@ -2384,11 +2390,12 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 
 	resc := make(chan responseAndError)
 	pc.reqch <- requestAndChan{
-		req:        req.Request,
-		ch:         resc,
-		addedGzip:  requestedGzip,
-		continueCh: continueCh,
-		callerGone: gone,
+		req:            req.Request,
+		ch:             resc,
+		addedGzip:      requestedGzip,
+		continueCh:     continueCh,
+		reqBodyWritten: req.bodyWritten,
+		callerGone:     gone,
 	}
 
 	var respHeaderTimer <-chan time.Time
